@@ -1,201 +1,409 @@
-# Loom System Overview & User Journey
+# Loom System Overview: Orchestrating Ralph Loops
 
 ## What is Loom?
 
-Loom is an AI-powered coding assistant built in Rust that provides a conversational interface for interacting with large language models. Think of it as a bridge between you and AI models like Claude or GPT-4, with built-in tools that let the AI read files, execute commands, and make changes to your codebase.
+Loom is infrastructure for running reliable, continuous AI agent loops. At its core, Loom orchestrates what's known as **Ralph loops** - a technique for autonomous software development where an AI agent works through tasks one loop at a time, building software through iteration and eventual consistency.
 
-## The Big Picture
+The name "Ralph" comes from Ralph Wiggum, embodying the philosophy that AI agents are **"deterministically bad in a non-deterministic world"**. They fail in predictable ways, which means you can tune their behavior through prompt refinement - putting up "signs by the slide" to guide better decisions.
 
-Loom consists of three main pieces that work together:
+## The Ralph Loop Technique
 
-**The Agent** - This is the brain that manages conversations with AI models. It keeps track of what's been said, when to call tools, and how to handle errors. The agent follows a state machine pattern, moving through well-defined states like "waiting for user input", "calling the LLM", and "executing tools".
+In its purest form, Ralph is a bash loop:
 
-**The Server** - This is a central HTTP service that acts as a proxy between clients and LLM providers. Instead of every client needing API keys, the server securely stores these keys and provides a unified interface. The server also handles authentication, stores conversation history, and can provision remote execution environments called weavers.
+```
+while :; do cat PROMPT.md | claude-code ; done
+```
 
-**The Clients** - These are the interfaces you interact with: a command-line interface, a web application, or a VS Code extension. All clients speak the same protocol and can resume conversations started on other devices.
+Each loop follows a cycle:
+1. **Load the stack** - Specifications, plans, and context (allocated fresh each loop)
+2. **Decide** - LLM chooses the single most important thing to do
+3. **Execute** - Run that one thing using tools (read, write, bash, search)
+4. **Validate** - Tests and builds provide backpressure (reject bad code)
+5. **Capture** - Document learnings for future loops
+6. **Loop** - Return to step 1 with a clean context window
 
-## Component Ecosystem
+The magic is in the constraint: **one thing per loop**. This keeps context windows small, focuses effort, and makes failures obvious. Ralph might be "chasing squirrels" sometimes, but he's predictably bad - you can see the patterns and add instructions to fix them.
 
-Here's how all the major pieces fit together:
+## Why Loom Exists
 
-**Core Components** (the foundation):
-- Agent State Machine: Orchestrates the conversation flow
-- Thread System: Stores and syncs conversation history
-- Tool System: Enables AI to interact with filesystems and execute commands
-- LLM Integration: Connects to Claude, GPT-4, and other AI models
-- Streaming System: Shows AI responses in real-time as they're generated
+Ralph loops work, but running them reliably at scale requires infrastructure:
 
-**Server Components**:
-- HTTP API: RESTful endpoints for all operations
-- Authentication: OAuth, magic links, and device code flow for CLI
-- Organizations: Multi-tenant support with teams and permissions
-- Audit System: Tracks all security-relevant events
+**The Problem:** A raw bash loop is fragile. Network failures, API rate limits, context window management, and lack of history make autonomous loops unreliable.
 
-**Remote Execution** (Weavers):
-- Kubernetes Pod Provisioning: Creates isolated containers on demand
-- WireGuard Tunneling: Secure SSH access to remote environments
-- Secrets Management: SPIFFE-style identity and credential injection
-- eBPF Auditing: System call monitoring for security
+**The Solution:** Loom provides the orchestration layer that makes Ralph loops production-ready:
+- Explicit state machines ensure loops progress deterministically
+- Thread persistence captures complete history across all loops
+- Retry logic handles transient failures gracefully
+- Subagent spawning extends context without pollution
+- Tool security prevents workspace boundary violations
+- Server-side secrets eliminate credential management
+- Automatic checkpointing enables resume from any point
 
-**Additional Systems**:
-- SCM System: Git hosting with branch protection and webhooks
-- Analytics: PostHog-style product analytics with identity resolution
-- Feature Flags: A/B testing and gradual rollouts
-- Web Frontend: Svelte 5 application with real-time updates
-- Editor Integration: VS Code extension using Agent Client Protocol
+Think of Loom as the difference between running a bash loop manually and having Kubernetes orchestrate your containers. The loop still does the work, but the infrastructure makes it reliable.
 
-## Glossary
+## The Architecture of Ralph Loops
 
-**Thread**: A conversation session with the AI, including all messages, tool executions, and metadata. Threads are persisted locally and optionally synced to the server.
+Loom consists of three main pieces that enable reliable autonomous loops:
 
-**Tool**: A function the AI can call to interact with the outside world, like reading a file or running a command. Each tool has a JSON schema that describes its inputs.
+### The Agent: Ralph's Brain
 
-**Weaver**: An ephemeral Kubernetes pod that runs a Loom agent session in an isolated environment. Weavers are automatically cleaned up after a configurable lifetime.
+The agent is a state machine that orchestrates each loop iteration. It moves through explicit states:
 
-**LLM Client**: An abstraction that lets Loom talk to different AI providers (Claude, GPT-4) through a unified interface.
+**WaitingForUserInput** → **CallingLlm** → **ProcessingLlmResponse** → **ExecutingTools** → **PostToolsHook** → back to **CallingLlm**
 
-**State Machine**: The agent's control flow logic, which explicitly defines all possible states and valid transitions between them.
+This creates the fundamental cycle: User → LLM → Tools → LLM → User. For autonomous work, Ralph enters this cycle once and keeps looping (LLM → Tools → LLM) until the task is complete.
 
-**SSE (Server-Sent Events)**: A web standard for streaming data from server to client, used to show AI responses in real-time.
+The state machine ensures Ralph never gets lost. Every transition is logged, retries are bounded, and errors are recoverable. You always know where Ralph is in the cycle.
 
-**ABAC (Attribute-Based Access Control)**: Fine-grained permission system based on attributes of users, resources, and actions.
+### The Thread System: Ralph's Memory
 
-**Proxy Architecture**: The server acts as a middleman between clients and LLM providers, keeping API keys server-side for security.
+Threads capture everything that happens across all loops - every message, tool execution, decision, and failure. This enables:
 
-## A Day in the Life: User Journey
+**Resume from anywhere** - Power outage? Server restart? Pick up exactly where Ralph left off.
 
-Let's walk through a typical session to see how everything works together:
+**Cross-device continuity** - Start Ralph on your laptop, continue on the web, check progress on your phone.
 
-### Starting a New Session (CLI)
+**Offline-first** - Ralph keeps working even if the server is unreachable. Sync happens opportunistically.
 
-You open your terminal in a project directory and type "loom". Here's what happens:
+**Audit trail** - See exactly what Ralph did and why. Every loop is preserved.
 
-1. **CLI Initialization**: The loom command-line tool starts up and checks if you're authenticated. If not, it initiates the device code flow.
+### The Server: Ralph's Support Infrastructure
 
-2. **Device Code Flow**: The CLI makes a request to the server asking for a device code. The server responds with a short code like "123-456-789" and displays "Visit https://loom.example.com/device and enter this code".
+The server handles everything Ralph shouldn't worry about:
 
-3. **Browser Authentication**: You open the URL in your browser, where you can log in using GitHub, Google, or a magic link sent to your email. After logging in, you enter the device code to authorize the CLI.
+**Secrets** - API keys stay server-side. Ralph just authenticates as himself.
 
-4. **Token Storage**: The CLI receives an access token and stores it in your system keychain (or config file as fallback). Future sessions will automatically use this token.
+**LLM Proxy** - Unified interface to Claude, GPT-4, and others. Switch providers without changing Ralph.
 
-5. **Thread Creation**: A new thread is created with a unique UUID7 identifier (like "T-019b2b97-..."). The thread captures your current directory as the workspace root.
+**Weavers** - Provision ephemeral Kubernetes pods when Ralph needs a clean environment.
 
-### Asking a Question
+**Multi-tenancy** - Organizations, teams, permissions, audit logs.
 
-You type: "How do I add logging to this application?"
+This separation means Ralph focuses on building software while infrastructure handles operations.
 
-1. **Message Processing**: The CLI creates a user message and sends it to the agent's state machine.
+## Core Principles of Ralph Loops
 
-2. **State Transition**: The agent transitions from "WaitingForUserInput" to "CallingLlm". It constructs an LLM request containing the conversation history and a list of available tools.
+### One Thing Per Loop
 
-3. **Server Proxy**: The agent (via ProxyLlmClient) sends an HTTP request to the server at "/proxy/anthropic/stream" (or "/proxy/openai/stream" depending on configuration).
+The cardinal rule: Ralph does one thing per iteration. Not two things. Not "a feature." One specific task.
 
-4. **LLM Request**: The server uses its stored API key to make a request to Claude's API. The request includes your question and definitions for all available tools.
+This keeps context windows small (critical for quality) and makes progress visible. If Ralph starts doing multiple things, narrow the instruction until he's back to one.
 
-5. **Streaming Response**: Claude starts generating a response, token by token. Each piece arrives as a Server-Sent Event.
+### Stack Allocation Every Loop
 
-6. **Real-Time Display**: Your terminal shows Claude's response appearing progressively: "You can use the tracing crate for structured logging. Let me show you an example..."
+Don't reuse context window allocations across loops. Instead, load specs and plans fresh each time:
 
-7. **Thread Update**: When the response completes, the agent transitions back to "WaitingForUserInput" and saves the updated thread locally. If sync is configured, a background task sends the thread to the server.
+```
+Your task is to implement missing stdlib (see @specs/stdlib/*).
+Follow @fix_plan.md and choose the most important thing.
+```
 
-### Tool Execution
+This seems wasteful - you're "burning" the allocation of reading specs every loop. But it's essential. Context windows have quality cliffs around 150k tokens. The less you use, the better Ralph performs.
 
-Claude decides it needs to see your current code and issues a tool call: "read_file" with the path "src/main.rs".
+### Extend Context with Subagents
 
-1. **Tool Call Detection**: The agent receives a response with "tool_calls" populated. It transitions to "ProcessingLlmResponse", then immediately to "ExecutingTools".
+When Ralph needs to allocate context for expensive work (like summarizing test output or searching the entire codebase), spawn a subagent. The subagent does the work and returns a concise result.
 
-2. **Parallel Execution**: The agent can execute multiple tool calls concurrently. Each tool execution goes through states: Pending, Running, Completed.
+Your main loop becomes a scheduler:
 
-3. **Path Validation**: The read_file tool validates that "src/main.rs" is within your workspace root (security boundary). It canonicalizes the path to prevent traversal attacks like "../../etc/passwd".
+```
+Before making changes, search codebase using parallel subagents (don't assume
+not implemented). You may use up to 100 parallel subagents for search, but only
+1 subagent for build/tests.
+```
 
-4. **File Reading**: The tool reads up to 1 megabyte of the file using async IO and returns the contents as JSON.
+This extends your effective context window without degrading the main loop's quality.
 
-5. **Progress Display**: Your terminal shows "[read_file] Reading src/main.rs..." and then "[read_file] ✓ Read 1,234 bytes".
+### Backpressure Rejects Bad Code
 
-6. **Result Accumulation**: All tool results are collected and formatted as tool result messages to send back to Claude.
+Code generation is cheap. **Validation is hard.** Wire in every form of backpressure you can:
+- Type checkers (mypy, dialyzer)
+- Tests (unit, integration, property-based)
+- Linters (clippy, eslint)
+- Static analyzers
+- Security scanners
 
-7. **Auto-Commit Hook**: After all tools complete, the agent enters the "PostToolsHook" state. If auto-commit is enabled and the tool made changes, Loom generates a commit message using the LLM and commits the changes.
+After Ralph generates code, the wheel must turn fast. If backpressure fails, Ralph loops again with the error. The faster the wheel turns, the faster Ralph learns.
 
-8. **Next LLM Turn**: The agent transitions back to "CallingLlm" with the tool results in the conversation history. Claude can now respond based on what it learned from the file.
+### Signs by the Slide
 
-### Making Changes
+Ralph will fall off the slide. When he does, you add a sign: "SLIDE DOWN, DON'T JUMP, LOOK AROUND."
 
-Claude suggests adding a logging statement and calls the "edit_file" tool with specific before/after snippets.
+In practice, this means adding instructions to the prompt:
 
-1. **Edit Execution**: The edit_file tool performs snippet-based replacement. It finds the exact "old_str" in the file and replaces it with "new_str".
+```
+9999999999999999999999999999. DO NOT IMPLEMENT PLACEHOLDER OR SIMPLE
+IMPLEMENTATIONS. WE WANT FULL IMPLEMENTATIONS. DO IT OR I WILL YELL AT YOU
+```
 
-2. **Atomic Write**: The edit is written to a temporary file first, then atomically renamed to the target. This prevents corruption if the process is interrupted.
+The models are trained to chase their reward function (compiling code). Sometimes you need to yell. Ralph doesn't take offense - he just reads the sign.
 
-3. **Verification**: The tool returns the number of bytes changed, which Claude can verify matches expectations.
+### Loop Back on Itself
 
-4. **Confirmation**: Claude responds: "I've added a tracing statement to your main function. The change has been applied."
+Create opportunities for Ralph to evaluate his own work. After generating code, have Ralph compile it and examine the LLVM IR. After running tests, have Ralph read the output and decide what to fix.
 
-### Resuming Later
+This self-reflection is where Ralph learns. Each loop informs the next.
 
-You close the terminal and come back the next day. You type "loom resume" to continue where you left off.
+### Trust and Eventual Consistency
 
-1. **Thread Lookup**: The CLI queries the local thread store for the most recent thread sorted by last_activity_at.
+Building with Ralph requires faith. He will make mistakes. He will implement the wrong thing. He will ignore your signs.
 
-2. **State Restoration**: The entire conversation history, agent state, and workspace context are loaded from the saved JSON file.
+But Ralph is **deterministically bad**. The mistakes follow patterns. You tune the prompts, add more signs, refine the specs. Over hundreds of loops, eventual consistency emerges.
 
-3. **Seamless Continuation**: You can immediately continue the conversation as if you never left. The agent remembers everything that happened.
+Ralph has built entire programming languages without those languages being in the training data. It works - if you trust the process.
 
-### Cross-Device Sync
+## Component Glossary
 
-Later, you open the web UI at https://loom.example.com on a different machine.
+**Thread**: A complete record of all loops - messages, tool executions, decisions, errors. Persisted locally and synced to server.
 
-1. **Web Authentication**: You log in with the same GitHub account you used in the CLI.
+**Tool**: A function Ralph can call - read_file, edit_file, bash, web_search. Each tool has a JSON schema the LLM uses to generate correct calls.
 
-2. **Thread Listing**: The server queries the database for all threads belonging to your user and organization. The web UI displays them sorted by recent activity.
+**Subagent**: A separate agent instance spawned for expensive operations. Returns a concise result to the main loop without polluting its context window.
 
-3. **Thread Loading**: You click on your thread. The server sends the complete thread JSON, including all messages and tool executions.
+**Weaver**: An ephemeral Kubernetes pod where Ralph can work in an isolated environment. Automatically cleaned up after configured lifetime.
 
-4. **Live Collaboration**: The web UI establishes a WebSocket connection to receive real-time updates. When you send a message, it streams back just like in the CLI.
+**State Machine**: The explicit flow of states Ralph moves through each loop. Makes behavior predictable and debuggable.
 
-### Remote Execution with Weavers
+**Backpressure**: Validation that rejects bad code - tests, type checkers, linters. Forces Ralph to loop again until code passes.
 
-You need to test code in a clean environment, so you create a weaver.
+**Hook**: Post-execution actions like auto-commit. After tools that mutate files, hooks capture changes in git commits.
 
-1. **Weaver Request**: You run "loom weaver create --image python:3.12". The CLI sends a POST request to "/api/weaver".
+**LLM Proxy**: Server-side abstraction over Claude, GPT-4, etc. Keeps API keys server-side and provides unified streaming interface.
 
-2. **Pod Provisioning**: The server uses the Kubernetes client to create a pod in the "loom-weavers" namespace with your specified image. Labels identify it as managed by Loom and owned by your user ID.
+## Two Modes: Interactive and Autonomous
 
-3. **Environment Injection**: The server automatically injects environment variables including LOOM_SERVER_URL and LOOM_WEAVER_ID.
+Loom supports both conversational (human-in-loop) and autonomous (Ralph loops) modes:
 
-4. **Waiting for Ready**: The server polls the pod status until it reaches "Running" state (or times out after 60 seconds).
+### Interactive Mode: Pair Programming
 
-5. **Weaver Response**: The CLI receives the weaver ID and can now attach to it: "loom attach <weaver-id>".
+You and the AI work together. You ask questions, the AI suggests solutions, calls tools, and waits for your input. This is traditional AI coding assistant behavior.
 
-6. **SSH Access (Optional)**: If WireGuard is enabled, the weaver registers with the tunnel server. You can SSH into the pod through the secure tunnel without exposing ports publicly.
+The state machine cycles: WaitingForUserInput → CallingLlm → Tools → CallingLlm → WaitingForUserInput
 
-7. **Automatic Cleanup**: After 4 hours (or your configured lifetime), a background task on the server finds expired weavers and deletes them from Kubernetes.
+Each cycle returns control to you.
+
+### Autonomous Mode: Ralph Takes the Wheel
+
+You give Ralph specifications and a plan, then let him loop continuously. Ralph decides what's most important, implements it, validates, and loops until the task list is empty.
+
+The state machine stays in the loop: CallingLlm → Tools → CallingLlm → Tools → ...
+
+You watch the stream, monitoring for patterns of bad behavior. When you see patterns, you stop Ralph, add signs to the prompt, and restart.
+
+**Key insight:** Ralph is monolithic. Don't try multi-agent systems yet. One Ralph, one repository, one task per loop. Keep it simple.
+
+## A Day in the Life: Interactive Mode
+
+Let's walk through a typical interactive session to see how Loom's components work together:
+
+### Starting a Session
+
+You open your terminal in a project directory and type `loom`.
+
+1. **Authentication Check**: The CLI checks for stored credentials. If absent, it initiates device code flow.
+
+2. **Device Code Flow**: CLI requests a code from the server. You visit the URL, log in (GitHub/Google/magic link), enter the code. CLI receives an access token and stores it in your system keychain.
+
+3. **Thread Creation**: A new thread with UUID7 identifier captures your workspace root and starts recording.
+
+### The First Loop Iteration
+
+You type: "Add logging to the user authentication function"
+
+1. **User Message**: CLI creates a message and transitions agent to CallingLlm state.
+
+2. **LLM Request**: Agent sends conversation history + tool definitions to server at `/proxy/anthropic/stream`.
+
+3. **Server Proxy**: Server uses its stored API key to call Claude's API.
+
+4. **Streaming Response**: Claude's response streams back token by token via Server-Sent Events. You see text appearing in real-time.
+
+5. **Tool Calls**: Claude decides to read the authentication file first. Agent transitions to ExecutingTools.
+
+6. **Tool Execution**: read_file validates the path is within workspace root, reads the file (up to 1MB), returns contents.
+
+7. **Back to LLM**: Agent transitions to CallingLlm with tool results. Claude now sees the code and suggests changes.
+
+8. **Edit Tool**: Claude calls edit_file with before/after snippets. Tool finds exact match, performs replacement, writes atomically.
+
+9. **Auto-Commit Hook**: After mutation tools complete, PostToolsHook state triggers. If auto-commit is enabled, Loom generates a commit message and commits changes.
+
+10. **Thread Save**: Agent returns to WaitingForUserInput. Thread saves locally. Background task syncs to server.
+
+This is one complete loop: User → LLM → Tools → LLM → User.
+
+### Cross-Device Resume
+
+Later, you open the web UI on a different machine. You log in, see your thread list, and click to continue.
+
+The server sends the complete thread JSON. The web UI reconstructs the conversation and establishes a WebSocket for live updates. You send a message and it streams back exactly like in the CLI.
+
+The thread is the source of truth. Clients are just views into it.
+
+## A Day in the Life: Autonomous Mode
+
+Now let's see Ralph working autonomously to build something substantial:
+
+### Setup Phase: Specifications
+
+Before starting autonomous loops, you have a conversation with the LLM about what to build. Instead of asking it to implement immediately, you discuss requirements, architecture, and constraints.
+
+Once the LLM understands the task, you issue:
+
+```
+Write detailed specifications for this project. Create one spec file per major
+component in specs/ directory. Include purpose, types, behavior, and examples.
+```
+
+The LLM generates specification documents. These become Ralph's stack allocation each loop.
+
+### The Plan
+
+You instruct Ralph to create a todo list:
+
+```
+Study specs/* to learn the project. Use up to 500 subagents to search existing
+code in src/ and compare against specs. Create @fix_plan.md - a bullet point
+list sorted by priority of what hasn't been implemented yet. Consider TODOs,
+placeholders, and minimal implementations.
+```
+
+Ralph spawns hundreds of subagents in parallel, searches the codebase, compares against specs, and creates a prioritized plan. This happens in one loop iteration.
+
+### Autonomous Loops Begin
+
+Now you start the continuous loop with:
+
+```
+Your task is to implement missing functionality (see @specs/*). Follow
+@fix_plan.md and choose the most important thing. Implement that ONE thing,
+run tests, and loop. Use parallel subagents for search, but only 1 subagent
+for build/tests.
+
+After implementing, run tests for that unit. If tests fail, resolve them.
+
+DO NOT implement placeholders or minimal implementations. Full implementations only.
+
+When you learn something about running tests or building, update @AGENT.md.
+```
+
+Ralph enters the loop:
+
+**Loop 1**: Ralph reads specs and plan, chooses "implement parser for function declarations," searches the codebase with subagents to verify not already implemented, implements the parser, runs tests. Tests pass. Ralph updates fix_plan.md marking this complete.
+
+**Loop 2**: Ralph reads updated plan, chooses "add type checking for function parameters," implements it, runs tests. Tests fail with type mismatch. Ralph examines error, fixes the implementation, runs tests again. Tests pass.
+
+**Loop 3**: Ralph reads plan, implements next item, tests pass.
+
+This continues. You watch the stream, looking for patterns:
+
+- Is Ralph implementing placeholders? Add a sign.
+- Is Ralph ignoring test failures? Strengthen the instruction.
+- Is Ralph assuming code doesn't exist without searching? Add "don't assume not implemented."
+
+### Backpressure in Action
+
+At Loop 47, Ralph generates code that compiles but has a type error the type checker catches. The build fails. Ralph sees the error and loops again with the failure in context.
+
+Loop 48: Ralph fixes the type error, builds successfully, moves on.
+
+The wheel turns fast. Rust's type system provides immediate, deterministic backpressure. Ralph learns quickly.
+
+### Self-Improvement
+
+At Loop 103, Ralph discovers that running tests requires a specific environment variable. Ralph updates @AGENT.md with this finding. Future loops read this file and know the correct command.
+
+Ralph has taken himself to university.
+
+### Plan Refresh
+
+At Loop 200, Ralph has completed everything in fix_plan.md. You notice the plan is getting stale. You stop the loop and issue:
+
+```
+The plan is complete. Generate a new @fix_plan.md by searching the entire
+codebase with subagents for TODOs, placeholders, minimal implementations, and
+missing features from specs.
+```
+
+Ralph generates a fresh plan. You restart the autonomous loop. Ralph continues.
+
+### Weaver Integration
+
+At Loop 350, you want Ralph to work in a clean environment. You provision a weaver:
+
+```
+loom weaver create --image rust:latest --repo https://github.com/you/project.git
+```
+
+A Kubernetes pod spins up with the repo cloned. You attach to it:
+
+```
+loom attach <weaver-id>
+```
+
+Ralph now runs inside the weaver. All file operations happen in the isolated container. When done, the weaver is automatically deleted. No cleanup needed.
+
+## How Loom Enables This
+
+Every part of Loom's architecture exists to make Ralph loops reliable:
+
+**State Machine** - Ralph never gets lost. Every transition is explicit. Errors are recoverable. Retries are bounded.
+
+**Thread Persistence** - Every loop is captured. Resume from anywhere. History never lost, even across crashes.
+
+**Tool Security** - Path validation prevents Ralph from escaping workspace boundaries. Even if Ralph hallucinates paths, the tools enforce constraints.
+
+**Subagent Support** - Ralph can spawn hundreds of subagents without polluting his main context window. This extends effective context dramatically.
+
+**Streaming** - See Ralph's reasoning in real-time. Catch mistakes early. Stop the loop when you see bad patterns.
+
+**Auto-Commit Hooks** - Every batch of mutations gets committed automatically with LLM-generated messages. Never lose work.
+
+**Server Proxy** - Switch LLM providers server-side. Ralph doesn't need API keys. Try Claude for reasoning, GPT-4 for code generation.
+
+**Retry Logic** - Transient failures (network, rate limits, timeouts) are retried automatically with exponential backoff. Ralph keeps looping.
+
+**Offline-First** - Ralph works even when the server is down. Threads save locally. Sync happens opportunistically.
 
 ## Key Design Patterns
 
-Throughout this journey, several patterns make Loom robust:
+**Monolithic Over Microservices** - Multi-agent systems add non-determinism. Ralph is monolithic: one agent, one repo, one task per loop.
 
-**Server-Side Secrets**: API keys never leave the server. Clients just choose which provider to use.
+**Explicit Over Implicit** - State transitions are logged. Context is carried explicitly in state variants. No hidden mutable fields.
 
-**Offline-First Persistence**: Threads always save locally first. Server sync happens in the background and retries on failure.
+**Deterministic Failure** - Ralph fails predictably. This lets you tune prompts and fix behavior patterns systematically.
 
-**Explicit State Machines**: The agent's state transitions are explicit and logged, making behavior predictable and debuggable.
+**Fast Feedback Loops** - The faster the wheel turns (generate → validate → loop), the faster Ralph learns. Optimize for tight cycles.
 
-**Defense in Depth**: Security is layered: path validation in tools, ABAC policies on the server, audit logging everywhere.
+**Eventual Consistency** - Trust the process. Over hundreds of loops, correct behavior emerges through tuning and backpressure.
 
-**Streaming Everything**: LLM responses, logs, and events all stream in real-time for immediate feedback.
+**Defense in Depth** - Security is layered: tool path validation, ABAC policies, audit logs, read-only filesystems in weavers.
 
-**Ephemeral Compute**: Weavers are short-lived and isolated. No persistent state means lower security risk.
+## What This Enables
+
+With Loom's infrastructure, Ralph can:
+
+- Build entire programming languages not in training data
+- Migrate codebases between frameworks autonomously
+- Generate comprehensive test suites with property-based tests
+- Refactor large codebases systematically
+- Implement specifications with full fidelity
+- Self-tune through documented learnings
+
+The key is: **you provide specifications and backpressure. Ralph provides iteration and eventual consistency.**
 
 ## What's Next?
 
-Now that you understand how all the pieces fit together, the following documents will dive deep into each component:
+Now that you understand the philosophy of Ralph loops and how Loom orchestrates them, the following documents dive deep into each component:
 
-1. **Core Agent State Machine**: Learn how the agent orchestrates conversations
-2. **Thread System**: Understand persistence, sync, and conflict resolution
-3. **Tool System**: See how tools are defined, secured, and executed
-4. **LLM Integration**: Explore provider abstraction and streaming
-5. **Server & Authentication**: Dive into multi-user security and organizations
-6. **Weaver System**: Master remote execution environments
-7. **Advanced Topics**: Analytics, feature flags, web UI, and more
+1. **Agent State Machine**: Learn the explicit states and transitions that make loops predictable
+2. **Thread System**: Understand how complete history is captured and synced
+3. **Tool System**: See how tools are secured and executed within workspace boundaries
+4. **LLM Integration**: Explore provider abstraction, streaming, and server-side proxy architecture
+5. **Server & Authentication**: Dive into multi-tenant security, organizations, and ABAC policies
+6. **Weaver System**: Master ephemeral execution environments on Kubernetes
+7. **Advanced Topics**: Analytics, feature flags, SCM, TUI, and extended systems
 
-Each document assumes you've read the previous ones and builds on those concepts. Start from the top and work your way down!
+Each document assumes you understand the Ralph loop philosophy. They explain the **mechanics** of how Loom implements this **vision**.
+
+Start from the top and work your way down. By the end, you'll understand both why Loom exists and how every component enables reliable autonomous development.
